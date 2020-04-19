@@ -1,0 +1,422 @@
+const int RAY_STEPS = 256;
+const float FOVY = 3.141569 * 0.25;
+const float pi = 3.1415926;
+
+struct Intersection
+{
+    float t;
+    vec3 color;
+    vec3 p;
+    int object;
+};
+    
+float sphere(vec3 p, float r, vec3 c)
+{
+    return distance(p, c) - r;
+}
+
+vec2 sphereUV(vec3 center, float r, vec3 p)
+{
+    vec3 pDir = normalize(p - center);
+    vec3 worldUp = vec3(0.0, 1.0, 0.0);
+    float theta = acos(dot(pDir, worldUp));
+    // If p is located at the positive part of z axis, then phi is 0-180.
+    // If p is located at the negative part of z axis, then phi is 180-360.
+    vec3 xzDir = normalize(vec3(pDir.x, 0.0, pDir.z));
+    float phi = acos(dot(xzDir, vec3(1.0, 0.0, 0.0)));
+    
+    if(pDir.z < 0.0)
+    {
+        phi = phi + pi;
+    }
+    
+    return vec2(theta / pi, phi / (2.0 * pi));
+}
+
+vec3 rotateY(vec3 p, float a) {
+    return vec3(cos(a) * p.x + sin(a) * p.z, p.y, -sin(a) * p.x + cos(a) * p.z);
+}
+
+float plane( vec3 p, vec4 n )
+{
+  // n must be normalized
+  return dot(p,n.xyz) + n.w;
+}
+
+void planeUVAxis(in vec3 p, in vec3 n, out vec3 u, out vec3 v)
+{
+    vec3 worldUp = vec3(0.0, 1.0, 0.0);
+    u = normalize(cross(worldUp, n));
+    v = normalize(cross(n, u));
+}
+
+vec2 planeUV(vec3 origin, vec3 n, vec3 p)
+{
+    vec3 uAxis;
+    vec3 vAxis;
+    planeUVAxis(origin, n, uAxis, vAxis);
+    vec3 diff = p - origin;
+    float uVal = dot(diff, uAxis);
+    float vVal = dot(diff, vAxis);
+    return vec2(uVal, vVal);
+}
+
+// Box with side lengths b
+float box(vec3 p, vec3 b)
+{
+  return length(max(abs(p) - b, 0.0));
+}
+
+vec3 random3( vec3 p ) {
+    return fract(sin(vec3(dot(p,vec3(127.1, 311.7, 191.999)),
+                          dot(p,vec3(269.5, 183.3, 765.54)),
+                          dot(p, vec3(420.69, 631.2,109.21))))
+                 *43758.5453);
+}
+
+vec2 random2( vec2 p ) {
+    return fract(sin(vec2(dot(p,vec2(127.1,311.7)),dot(p,vec2(269.5,183.3))))*43758.5453);
+}
+
+float random1( vec2 p ) {
+    return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);
+}
+
+float WorleyNoise(vec2 uv) {
+    // Tile the space
+    uv *= 1.0;
+    vec2 uvInt = floor(uv);
+    vec2 uvFract = fract(uv);
+    float minDist = 1.0; // Minimum distance initialized to max.
+
+    // Search all neighboring cells and this cell for their point
+    for(int y = -1; y <= 1; y++) {
+        for(int x = -1; x <= 1; x++) {
+            vec2 neighbor = vec2(float(x), float(y));
+
+            // Random point inside current neighboring cell
+            vec2 point = random2(uvInt + neighbor);
+
+            // Animate the point
+			point = 0.5 + 0.5 * sin(iTime + 6.2831 * point); // 0 to 1 range
+
+            // Compute the distance b/t the point and the fragment
+            // Store the min dist thus far
+            vec2 diff = neighbor + point - uvFract;
+            float dist = length(diff);
+            minDist = min(minDist, dist);
+        }
+    }
+    return minDist;
+}
+
+#define FBM_OCTAVES 4
+
+float mySmootherStep(float a, float b, float t) {
+    t = t*t*t*(t*(t*6.0 - 15.0) + 10.0);
+    return mix(a, b, t);
+}
+
+float bilerpNoise(vec2 uv) {
+    vec2 uvFract = fract(uv);
+    float ll = random1(floor(uv));
+    float lr = random1(floor(uv) + vec2(1,0));
+    float ul = random1(floor(uv) + vec2(0,1));
+    float ur = random1(floor(uv) + vec2(1,1));
+
+    float lerpXL = mySmootherStep(ll, lr, uvFract.x);
+    float lerpXU = mySmootherStep(ul, ur, uvFract.x);
+
+    return mySmootherStep(lerpXL, lerpXU, uvFract.y);
+}
+
+float fbm(vec2 uv) {
+    float amp = 0.5;
+    float freq = 8.0;
+    float sum = 0.0;
+    for(int i = 0; i < FBM_OCTAVES; i++) {
+        sum += bilerpNoise(uv * freq) * amp;
+        amp *= 0.5;
+        freq *= 2.0;
+    }
+    return sum;
+}
+
+
+float surflet(vec2 P, vec2 gridPoint) {
+    // Compute falloff function by converting linear distance to a polynomial (quintic smootherstep function)
+    float distX = abs(P.x - gridPoint.x);
+    float distY = abs(P.y - gridPoint.y);
+    float tX = 1.0 - 6.0 * pow(distX, 5.0) + 15.0 * pow(distX, 4.0) - 10.0 * pow(distX, 3.0);
+    float tY = 1.0 - 6.0 * pow(distY, 5.0) + 15.0 * pow(distY, 4.0) - 10.0 * pow(distY, 3.0);
+
+    // Get the random vector for the grid point
+    vec2 gradient = random2(gridPoint);
+    // Get the vector from the grid point to P
+    vec2 diff = P - gridPoint;
+    // Get the value of our height field by dotting grid->P with our gradient
+    float height = dot(diff, gradient);
+    // Scale our height field (i.e. reduce it) by our polynomial falloff function
+    return height * tX * tY;
+}
+
+
+float PerlinNoise(vec2 uv) {
+    // Tile the space
+    vec2 uvXLYL = floor(uv);
+    vec2 uvXHYL = uvXLYL + vec2(1,0);
+    vec2 uvXHYH = uvXLYL + vec2(1,1);
+    vec2 uvXLYH = uvXLYL + vec2(0,1);
+
+    return surflet(uv, uvXLYL) + surflet(uv, uvXHYL) + surflet(uv, uvXHYH) + surflet(uv, uvXLYH);
+}
+
+float surflet3D(vec3 p, vec3 gridPoint)
+{
+    vec3 t3 = abs(p - gridPoint);
+    
+    float tX = 1.f - 6.f * pow(t3.x, 5.f) - 15.f * pow(t3.x, 4.f) + 10.f * pow(t3.x, 3.f);
+    float tY = 1.f - 6.f * pow(t3.y, 5.f) - 15.f * pow(t3.y, 4.f) + 10.f * pow(t3.y, 3.f);
+    float tZ = 1.f - 6.f * pow(t3.z, 5.f) - 15.f * pow(t3.z, 4.f) + 10.f * pow(t3.z, 3.f);
+    
+    vec3 t = vec3(tX, tY, tZ);
+    
+    vec3 gradient = random3(gridPoint);
+    vec3 diff = p - gridPoint;
+    float height = dot(diff, gradient);
+    return height * t.x * t.y * t.z;
+}
+
+float PerlinNoise3D(vec3 p)
+{
+    float surfletSum = 0.0;
+    vec3 pXLYLZL = floor(p);
+    
+    for(int dx = 0; dx <= 1; ++dx)
+    {
+        for(int dy = 0; dy <= 1; ++dy)
+        {
+            for(int dz = 0; dz <= 1; ++dz)
+            {
+                surfletSum += surflet3D(p, pXLYLZL + vec3(dx, dy, dz));
+            }
+        }
+    }
+    
+    return surfletSum;
+}
+
+#define SPHERE_1_SDF sphere(pos, 1.0, vec3(2., 0., 1.))
+#define SPHERE_2_SDF sphere(pos, 2.0, vec3(4., 2., 0.))
+#define SPHERE_1_ID 1
+#define SPHERE_2_ID 2
+
+#define BACK_WALL_SDF plane(pos, vec4(0.0, 0.0, -1.0, 5.0))
+#define BACK_WALL_ID 3 
+
+#define LEFT_WALL_SDF plane(pos, vec4(1.0, 0.0, 0.0, 5.0))
+#define LEFT_WALL_ID 4
+
+#define RIGHT_WALL_SDF plane(pos, vec4(-1.0, 0.0, 0.0, 5.0))
+#define RIGHT_WALL_ID 5
+
+#define CEILING_WALL_SDF plane(pos, vec4(0.0, -1.0, 0.0, 7.5))
+#define CEILING_WALL_ID 6
+
+#define FLOOR_SDF plane(pos, vec4(0.0, 1.0, 0.0, 2.5))
+#define FLOOR_ID 7
+
+#define TALL_BOX_SDF box(rotateY(pos + vec3(2, 0.5, -3), 27.5 * 3.14159 / 180.0), vec3(1, 2, 1))
+#define TALL_BOX_ID 8
+
+#define SMALL_BOX_SDF box(rotateY(pos + vec3(-2, 1, -0.75), -27.5 * 3.14159 / 180.0), vec3(1, 1, 1))
+#define SMALL_BOX_ID 9
+
+
+void sceneMap3D(vec3 pos, out float t, out int obj)
+{
+    t = BACK_WALL_SDF;
+    obj = BACK_WALL_ID;
+    
+    float t2;
+    if((t2 = LEFT_WALL_SDF) < t)
+    {
+        t = t2;
+        obj = LEFT_WALL_ID;
+    }
+    if((t2 = RIGHT_WALL_SDF) < t)
+    {
+        t = t2;
+        obj = RIGHT_WALL_ID;
+    }
+    if((t2 = CEILING_WALL_SDF) < t)
+    {
+        t = t2;
+        obj = CEILING_WALL_ID;
+    }
+    if((t2 = FLOOR_SDF) < t)
+    {
+        t = t2;
+        obj = FLOOR_ID;
+    }
+    if((t2 = TALL_BOX_SDF) < t)
+    {
+        t = t2;
+        obj = TALL_BOX_ID;
+    }
+    if((t2 = SPHERE_1_SDF) < t)
+    {
+        t = t2;
+        obj = SPHERE_1_ID;
+    }
+}
+
+float sceneMap3D(vec3 pos)
+{
+    float t = BACK_WALL_SDF;
+    
+    t = min(t, LEFT_WALL_SDF);
+    t = min(t, RIGHT_WALL_SDF);
+    t = min(t, CEILING_WALL_SDF);
+    t = min(t, FLOOR_SDF);
+    t = min(t, TALL_BOX_SDF);
+    t = min(t, SPHERE_1_SDF);
+    
+    return t;
+}
+
+vec3 computeNormal(vec3 pos)
+{
+    vec3 epsilon = vec3(0.0, 0.001, 0.0);
+    return normalize( vec3( sceneMap3D(pos + epsilon.yxx) - sceneMap3D(pos - epsilon.yxx),
+                            sceneMap3D(pos + epsilon.xyx) - sceneMap3D(pos - epsilon.xyx),
+                            sceneMap3D(pos + epsilon.xxy) - sceneMap3D(pos - epsilon.xxy)));
+}
+
+void march(vec3 origin, vec3 dir, out float t, out int hitObj)
+{
+    t = 0.001;
+    for(int i = 0; i < RAY_STEPS; ++i)
+    {
+        vec3 pos = origin + t * dir;
+    	float m;
+        sceneMap3D(pos, m, hitObj);
+        if(m < 0.01)
+        {
+            return;
+        }
+        t += m;
+    }
+    t = -1.0;
+    hitObj = -1;
+}
+
+const vec3 a = vec3(0.5, 0.5, 0.5);
+const vec3 b = vec3(0.5, 0.5, 0.5);
+const vec3 c = vec3(1.0, 1.0, 1.0);
+const vec3 d = vec3(0.00, 0.33, 0.67);
+
+vec3 colorPalette(float t)
+{
+    return a + b * cos(6.28 * (t * c + d));
+}
+
+vec3 computeMaterial(int hitObj, vec3 p, vec3 n, vec3 lightVec, vec3 view)
+{
+    float lambert = dot(-lightVec, n);
+    switch(hitObj){
+        case TALL_BOX_ID:
+        vec3 noisePos = vec3(p.x + sin(iTime), p.y + sin(iTime), p.z + sin(iTime));
+        float perlinNoiseVal = PerlinNoise3D(noisePos);
+        vec3 perlinColor = colorPalette(perlinNoiseVal);
+        return perlinColor * lambert;
+        break;
+        case SPHERE_1_ID:
+        vec2 uv = sphereUV(vec3(2., 0., 1.), 1.0, p);        
+        uv.x = (uv.x + sin(iTime) + 1.0) / 3.0;
+        uv.y = (uv.y + sin(iTime) + 1.0) / 3.0;        
+        float fbmVal = fbm(uv);
+        vec3 fbmColor = colorPalette(fbmVal);        
+        return fbmColor * lambert;        
+        break;
+        case BACK_WALL_ID:
+        // Compute Back Wall UV coordinate:
+        vec3 norBackWall = vec3(0.0, 0.0, -1.0);
+        float dBackWall = 5.0;
+        vec2 backWallUV = planeUV(norBackWall * dBackWall, norBackWall, p);
+        float worleyNoiseVal = WorleyNoise(backWallUV);
+        vec3 bwColor = colorPalette(1.0 - worleyNoiseVal);
+        // return vec3(1., 1., 1.) * lambert;
+        return bwColor * lambert;
+        break;
+        case LEFT_WALL_ID:
+        return vec3(0.25, 1., 0.5) * lambert;
+        break;
+        case RIGHT_WALL_ID:
+        return vec3(1., 0.5, 0.25) * lambert;
+        break;
+        case CEILING_WALL_ID:
+        return vec3(1., 1., 1.) * lambert;
+        break;
+        case FLOOR_ID:
+        return vec3(1., 1., 1.) * lambert;
+        break;
+        case -1:
+        return vec3(0., 0., 0.);
+        break;
+    }
+    return vec3(0., 0., 0.);
+}
+
+Intersection sdf3D(vec3 dir, vec3 eye)
+{
+    float t;
+    int hitObj;
+    march(eye, dir, t, hitObj);
+
+    vec3 isect = eye + t * dir;
+    vec3 nor = computeNormal(isect);
+    vec3 lightPos = vec3(0., 4., -3.);
+
+    vec3 lightDir = normalize(isect - lightPos);
+    
+    vec3 surfaceColor = computeMaterial(hitObj, isect, nor, lightDir, normalize(eye - isect));
+
+    
+    return Intersection(t, surfaceColor, isect, hitObj);
+}
+
+
+vec3 rayCast(vec3 eye, vec3 ref, vec2 ndc)
+{
+    vec3 F = ref - eye;
+    vec3 R = normalize(cross(F, vec3(0.0, 1.0, 0.0)));
+    vec3 U = normalize(cross(R, F));
+    
+    vec3 V = U * length(F) * tan(FOVY * 0.5);
+    vec3 H = R * length(F) * tan(FOVY * 0.5) * float(iResolution.x) / iResolution.y;
+    
+    vec3 p = ref + ndc.x * H + ndc.y * V;
+    
+    return normalize(p - eye);
+}
+
+void mainImage( out vec4 fragColor, in vec2 fragCoord )
+{
+    // Normalized pixel coordinates (from 0 to 1)
+    vec2 uv = fragCoord/iResolution.xy;
+    
+    // [-1, 1]
+    uv = uv * 2.0 - vec2(1.0, 1.0);
+    
+    vec3 eye = vec3(0, 4, -23);
+    
+    vec3 ref = vec3(0, 0, 0);
+    
+    vec3 rayDir = rayCast(eye, ref, uv);
+    
+    Intersection isect = sdf3D(rayDir, eye);
+ 
+    // Output to screen
+    fragColor = vec4(isect.color, 1.0);
+}

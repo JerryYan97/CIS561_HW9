@@ -1,0 +1,46 @@
+// from https://www.shadertoy.com/view/XdfGDH
+float normpdf(in float x, in float sigma)
+{
+	return 0.39894*exp(-0.5*x*x/(sigma*sigma))/sigma;
+}
+
+
+void mainImage( out vec4 fragColor, in vec2 fragCoord )
+{
+    // from https://www.shadertoy.com/view/XdfGDH
+    const int mSize = 11;
+    const int kSize = (mSize-1)/2;
+    float kernel[mSize];
+    vec3 final_color = vec3(0.0);
+
+    //create the 1-D kernel
+    float sigma = 20.0;
+    float Z = 0.0;
+    for (int j = 0; j <= kSize; ++j) {
+        kernel[kSize+j] = kernel[kSize-j] = normpdf(float(j), sigma);
+    }
+
+    //get the normalization factor (as the gaussian has been clamped)
+    for (int j = 0; j < mSize; ++j) {
+        Z += kernel[j];
+    }
+    
+    //read out the texels
+    for (int i=-kSize; i <= kSize; ++i) {
+        for (int j=-kSize; j <= kSize; ++j) {
+            final_color += kernel[kSize+j]*kernel[kSize+i]*texture(iChannel0, (fragCoord.xy+vec2(float(i),float(j))) / iResolution.xy).rgb;
+
+        }
+    }
+    
+    // Normalized pixel coordinates (from 0 to 1)
+    vec2 uv = fragCoord/iResolution.xy;
+    vec4 unblurredColor = texture(iChannel0, uv);
+
+    // Time varying pixel color
+    fragColor = vec4(mix(unblurredColor.rgb, final_color/(Z*Z), unblurredColor.a), 1.0);
+
+    // Output to screen
+    float vignette = smoothstep(1.75, 0.0, length((2.0 * uv) - vec2(1.0)));
+    fragColor = mix(vec4(0.0, 0.0, 0.1, 1.0), fragColor, vignette);
+}

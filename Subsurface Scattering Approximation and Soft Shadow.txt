@@ -1,0 +1,260 @@
+const int RAY_STEPS = 256;
+const float FOVY = 3.141569 * 0.25;
+
+// The higher the value, the smaller the penumbra
+const float SHADOW_HARDNESS = 10.0;
+
+// Adjust these to alter where the subsurface glow shines through and how brightly
+const float FIVETAP_K = 2.0;
+const float AO_DIST = 0.085;
+
+// The larger the DISTORTION, the smaller the glow
+const float DISTORTION = 0.2;
+// The higher GLOW is, the smaller the glow of the subsurface scattering
+const float GLOW = 6.0;
+// The higher the BSSRDF_SCALE, the brighter the scattered light
+const float BSSRDF_SCALE = 3.0;
+// Boost the shadowed areas in the subsurface glow with this
+const float AMBIENT = 0.0;
+// Toggle this to affect how easily the subsurface glow propagates through an object
+#define ATTENUATION 0
+
+struct Intersection
+{
+    float t;
+    vec3 color;
+    vec3 p;
+    int object;
+};
+    
+float sphere(vec3 p, float r, vec3 c)
+{
+    return distance(p, c) - r;
+}
+
+vec3 rotateY(vec3 p, float a) {
+    return vec3(cos(a) * p.x + sin(a) * p.z, p.y, -sin(a) * p.x + cos(a) * p.z);
+}
+
+float plane( vec3 p, vec4 n )
+{
+  // n must be normalized
+  return dot(p,n.xyz) + n.w;
+}
+
+// Box with side lengths b
+float box(vec3 p, vec3 b)
+{
+  return length(max(abs(p) - b, 0.0));
+}
+
+float subsurface(vec3 lightDir, vec3 normal, vec3 viewVec, float thickness) {
+    vec3 scatteredLightDir = lightDir + normal * DISTORTION;
+    float lightReachingEye = pow(clamp(dot(viewVec, -scatteredLightDir), 0.0, 1.0), GLOW) * BSSRDF_SCALE;
+    float attenuation = 1.0;
+    #if ATTENUATION
+    attenuation = max(0.0, dot(normal, lightDir) + dot(viewVec, -lightDir));
+    #endif
+	float totalLight = attenuation * (lightReachingEye + AMBIENT) * thickness;
+    return totalLight;
+}
+
+#define SPHERE_1_SDF sphere(pos, 1.0, vec3(0., 3., 3.))
+#define SPHERE_2_SDF sphere(pos, 2.0, vec3(4., 2., 0.))
+#define SPHERE_1_ID 1
+#define SPHERE_2_ID 2
+
+#define BACK_WALL_SDF plane(pos, vec4(0.0, 0.0, -1.0, 5.0))
+#define BACK_WALL_ID 3 
+
+#define LEFT_WALL_SDF plane(pos, vec4(1.0, 0.0, 0.0, 5.0))
+#define LEFT_WALL_ID 4
+
+#define RIGHT_WALL_SDF plane(pos, vec4(-1.0, 0.0, 0.0, 5.0))
+#define RIGHT_WALL_ID 5
+
+#define CEILING_WALL_SDF plane(pos, vec4(0.0, -1.0, 0.0, 7.5))
+#define CEILING_WALL_ID 6
+
+#define FLOOR_SDF plane(pos, vec4(0.0, 1.0, 0.0, 3.5))
+#define FLOOR_ID 7
+
+#define TALL_BOX_SDF box(rotateY(pos + vec3(2, -1, -1), 27.5 * 3.14159 / 180.0), vec3(1, 2, 1))
+#define TALL_BOX_ID 8
+
+#define SMALL_BOX_SDF box(rotateY(pos + vec3(-2, -2, -0.75), -27.5 * 3.14159 / 180.0), vec3(1, 1, 1))
+#define SMALL_BOX_ID 9
+
+
+void sceneMap3D(vec3 pos, out float t, out int obj)
+{
+    t = FLOOR_SDF;
+    obj = FLOOR_ID;
+    
+    float t2;
+
+    if((t2 = TALL_BOX_SDF) < t)
+    {
+        t = t2;
+        obj = TALL_BOX_ID;
+    }
+    if((t2 = SMALL_BOX_SDF) < t)
+    {
+        t = t2;
+        obj = SMALL_BOX_ID;
+    }
+    if((t2 = SPHERE_1_SDF) < t)
+    {
+        t = t2;
+        obj = SPHERE_1_ID;
+    }
+}
+
+float sceneMap3D(vec3 pos)
+{
+    float t = FLOOR_SDF;
+    
+    t = min(t, TALL_BOX_SDF);
+    t = min(t, SMALL_BOX_SDF);
+    t = min(t, SPHERE_1_SDF);
+    
+    return t;
+}
+
+float shadowMap3D(vec3 pos)
+{
+    float t = FLOOR_SDF;
+    t = min(t, TALL_BOX_SDF);
+    t = min(t, SMALL_BOX_SDF);
+    return t;
+}
+
+
+float fiveTapAO(vec3 p, vec3 n, float k) {
+    float aoSum = 0.0;
+    for(float i = 0.0; i < 5.0; ++i) {
+        float coeff = 1.0 / pow(2.0, i);
+        aoSum += coeff * (i * AO_DIST - shadowMap3D(p + n * i * AO_DIST));
+    }
+    return 1.0 - k * aoSum;
+}
+
+vec3 computeNormal(vec3 pos)
+{
+    vec3 epsilon = vec3(0.0, 0.001, 0.0);
+    return normalize( vec3( sceneMap3D(pos + epsilon.yxx) - sceneMap3D(pos - epsilon.yxx),
+                            sceneMap3D(pos + epsilon.xyx) - sceneMap3D(pos - epsilon.xyx),
+                            sceneMap3D(pos + epsilon.xxy) - sceneMap3D(pos - epsilon.xxy)));
+}
+
+void march(vec3 origin, vec3 dir, out float t, out int hitObj)
+{
+    t = 0.001;
+    for(int i = 0; i < RAY_STEPS; ++i)
+    {
+        vec3 pos = origin + t * dir;
+    	float m;
+        sceneMap3D(pos, m, hitObj);
+        if(m < 0.01)
+        {
+            return;
+        }
+        t += m;
+    }
+    t = -1.0;
+    hitObj = -1;
+}
+
+float softShadow(vec3 dir, vec3 origin, float min_t, float k) {
+    float res = 1.0;
+    float t = min_t;
+    for(int i = 0; i < RAY_STEPS; ++i) {
+        float m = shadowMap3D(origin + t * dir);
+        if(m < 0.0001) {
+            return 0.0;
+        }
+        res = min(res, k * m / t);
+        t += m;
+    }
+    // return 0.5;
+    return res;
+}
+
+
+vec3 computeMaterial(int hitObj, vec3 p, vec3 n, vec3 lightVec, vec3 view, float thick)
+{
+    float lambert = dot(-lightVec, n);
+    float shadow = softShadow(-lightVec, p, 0.1, 14.0);
+    vec3 lightColor = vec3(1.0, 0.88, 0.7);
+    float sss = subsurface(-lightVec, n, view, thick);
+    
+    switch(hitObj){
+        case TALL_BOX_ID:
+        return vec3(1., 1., 0.) * lambert * shadow + sss * lightColor * vec3(1., 1., 0.);
+        break;
+        case SMALL_BOX_ID:
+        return vec3(0., 1., 1.) * lambert * shadow + sss * lightColor * vec3(0., 1., 1.);
+        break;
+        case SPHERE_1_ID:
+        return vec3(1.0, 0.88, 0.7);
+        case FLOOR_ID:
+        return lambert * shadow * lightColor;
+        break;
+        case -1:
+        return vec3(0., 0., 0.);
+        break;
+    }
+    return vec3(0., 0., 0.);
+}
+
+Intersection sdf3D(vec3 dir, vec3 eye)
+{
+    float t;
+    int hitObj;
+    march(eye, dir, t, hitObj);
+
+    vec3 isect = eye + t * dir;
+    vec3 nor = computeNormal(isect);
+    vec3 lightPos = vec3(0., 3., 3.);
+    vec3 lightDir = normalize(isect - lightPos);
+    float thickness = fiveTapAO(isect, -nor, FIVETAP_K);
+    
+    vec3 surfaceColor = computeMaterial(hitObj, isect, nor, lightDir, normalize(eye - isect), thickness);
+
+    return Intersection(t, surfaceColor, isect, hitObj);
+}
+
+
+vec3 rayCast(vec3 eye, vec3 ref, vec2 ndc)
+{
+    vec3 F = ref - eye;
+    vec3 R = normalize(cross(F, vec3(0.0, 1.0, 0.0)));
+    vec3 U = normalize(cross(R, F));
+    
+    vec3 V = U * length(F) * tan(FOVY * 0.5);
+    vec3 H = R * length(F) * tan(FOVY * 0.5) * float(iResolution.x) / iResolution.y;
+    
+    vec3 p = ref + ndc.x * H + ndc.y * V;
+    
+    return normalize(p - eye);
+}
+
+void mainImage( out vec4 fragColor, in vec2 fragCoord )
+{
+    // Normalized pixel coordinates (from 0 to 1)
+    vec2 uv = fragCoord/iResolution.xy;
+    
+    // [-1, 1]
+    uv = uv * 2.0 - vec2(1.0, 1.0);
+    
+    vec3 eye = rotateY(vec3(0, 2, -20), iTime);
+    
+    vec3 ref = vec3(0, 0, 0);
+    
+    vec3 rayDir = rayCast(eye, ref, uv);
+    
+    Intersection isect = sdf3D(rayDir, eye);
+ 
+    // Output to screen
+    fragColor = vec4(isect.color, 1.0);
+}
